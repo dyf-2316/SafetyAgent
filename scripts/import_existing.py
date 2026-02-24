@@ -29,7 +29,7 @@ async def main():
     
     await sync_service._initial_scan()
     
-    print("✅ Import completed successfully!")
+        print("✅ Import completed successfully!")
 
 
 if __name__ == "__main__":

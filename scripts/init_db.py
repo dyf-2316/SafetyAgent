@@ -8,8 +8,11 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from safetyagent.database import init_db
 from safetyagent.config import settings
+from safetyagent.database import init_db
+
+# Import all models to ensure they're registered with Base.metadata
+from safetyagent.models import Event, Message, Session, ToolCall  # noqa: F401
 
 
 async def main() -> None:

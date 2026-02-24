@@ -124,14 +124,6 @@ class Message(Base, TimestampMixin):
         cascade="all, delete-orphan"
     )
 
-    # Event relationship (only for user messages that trigger an event)
-    triggered_event: Mapped["Event | None"] = relationship(
-        "Event",
-        back_populates="user_message",
-        foreign_keys="[Event.user_message_id]",
-        uselist=False,
-    )
-
     # Indexes
     __table_args__ = (
         Index("ix_messages_session_timestamp", "session_id", "timestamp"),

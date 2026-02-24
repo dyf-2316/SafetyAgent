@@ -4,14 +4,15 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..database import get_db_context
-from ..models import Message, Session, ToolCall
+from ..models import Event, Message, Session, ToolCall
 from ..parsers import JSONLEntry, JSONLParser
 from ..watchers import SessionFileWatcher
+from .event_sync_service import EventSyncService
 
 
 class MessageSyncService:
@@ -23,9 +24,14 @@ class MessageSyncService:
         self.watcher: SessionFileWatcher | None = None
         self._running = False
         self._sync_task: asyncio.Task | None = None
+        self._event_sync_service = EventSyncService()
         
         # Track file sync positions: {file_path: last_synced_line}
         self._sync_positions: dict[str, int] = {}
+        
+        # Track sessions that need event sync: set of session_ids
+        self._pending_event_sync: set[str] = set()
+        self._event_sync_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the sync service."""
@@ -37,6 +43,15 @@ class MessageSyncService:
         # Initial scan of existing files
         await self._initial_scan()
 
+        # Sync events for all sessions after initial message sync
+        print("🔄 Syncing events for all sessions...")
+        try:
+            event_results = await self._event_sync_service.sync_all_sessions()
+            total_events = sum(event_results.values())
+            print(f"✅ Event sync completed: {total_events} events across {len(event_results)} sessions")
+        except Exception as e:
+            print(f"❌ Error during initial event sync: {e}")
+
         # Start file watcher
         self.watcher = SessionFileWatcher(
             watch_directory=self.sessions_dir,
@@ -46,6 +61,9 @@ class MessageSyncService:
 
         # Start periodic full scan task
         self._sync_task = asyncio.create_task(self._periodic_full_scan())
+        
+        # Start debounced event sync task
+        self._event_sync_task = asyncio.create_task(self._debounced_event_sync_loop())
         
         self._running = True
         print("✅ Message Sync Service started")
@@ -69,11 +87,22 @@ class MessageSyncService:
             except asyncio.CancelledError:
                 pass
 
+        # Cancel event sync task
+        if self._event_sync_task:
+            self._event_sync_task.cancel()
+            try:
+                await self._event_sync_task
+            except asyncio.CancelledError:
+                pass
+
         self._running = False
         print("✅ Message Sync Service stopped")
 
     async def _initial_scan(self) -> None:
-        """Scan and sync all existing JSONL files."""
+        """Scan and sync all existing JSONL files.
+        
+        Also cleans up database sessions whose JSONL files no longer exist.
+        """
         print("📊 Performing initial scan...")
         
         if not self.sessions_dir.exists():
@@ -81,8 +110,13 @@ class MessageSyncService:
             return
 
         jsonl_files = list(self.sessions_dir.glob("*.jsonl"))
-        print(f"Found {len(jsonl_files)} session files")
+        existing_session_ids = {f.stem for f in jsonl_files}
+        print(f"Found {len(jsonl_files)} session files on disk")
 
+        # 1. Clean up stale sessions (exist in DB but not on disk)
+        await self._cleanup_stale_sessions(existing_session_ids)
+
+        # 2. Sync existing files
         for file_path in jsonl_files:
             try:
                 await self._sync_file(file_path, full_sync=True)
@@ -100,10 +134,46 @@ class MessageSyncService:
                 await asyncio.sleep(interval)
                 print("🔄 Running periodic full scan...")
                 await self._initial_scan()
+                # After full scan, sync events for all sessions
+                print("🔄 Syncing events after periodic scan...")
+                try:
+                    await self._event_sync_service.sync_all_sessions()
+                except Exception as e:
+                    print(f"❌ Error syncing events after periodic scan: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"❌ Error in periodic scan: {e}")
+
+    async def _debounced_event_sync_loop(self) -> None:
+        """Debounced event sync loop.
+        
+        Waits for pending session IDs to accumulate, then syncs events in batch.
+        This avoids excessive event syncs when many file changes happen rapidly.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(3)  # Wait 3 seconds to batch changes
+                
+                if not self._pending_event_sync:
+                    continue
+                
+                # Grab pending session IDs and clear the set
+                session_ids = self._pending_event_sync.copy()
+                self._pending_event_sync.clear()
+                
+                for session_id in session_ids:
+                    try:
+                        count = await self._event_sync_service.sync_session_events(session_id)
+                        if count > 0:
+                            print(f"🔄 Auto-synced {count} events for session {session_id[:8]}...")
+                    except Exception as e:
+                        print(f"❌ Error auto-syncing events for {session_id[:8]}...: {e}")
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ Error in event sync loop: {e}")
 
     async def _on_file_event(self, event_type: str, file_path: str) -> None:
         """Handle file system events."""
@@ -112,13 +182,145 @@ class MessageSyncService:
         if event_type == "created":
             print(f"📄 New session file: {path.name}")
             await self._sync_file(path, full_sync=True)
+            # Schedule event sync for this session
+            self._pending_event_sync.add(path.stem)
         
         elif event_type == "modified":
             print(f"✏️  Session file updated: {path.name}")
             await self._sync_file(path, full_sync=False)
+            # Schedule event sync for this session
+            self._pending_event_sync.add(path.stem)
         
         elif event_type == "deleted":
             print(f"🗑️  Session file deleted: {path.name}")
+            session_id = path.stem
+            await self._delete_session_data(session_id)
+            # Clean up sync position tracking and pending event sync
+            file_path_str = str(path)
+            self._sync_positions.pop(file_path_str, None)
+            self._pending_event_sync.discard(session_id)
+
+    async def _cleanup_stale_sessions(self, existing_session_ids: set[str]) -> None:
+        """Remove sessions from DB that no longer have corresponding JSONL files.
+        
+        Args:
+            existing_session_ids: Set of session IDs that currently exist on disk.
+        """
+        try:
+            async with get_db_context() as db:
+                # Get all session IDs from database
+                result = await db.execute(select(Session.session_id))
+                db_session_ids = set(result.scalars().all())
+                
+                # Find sessions that are in DB but not on disk
+                stale_session_ids = db_session_ids - existing_session_ids
+                
+                if not stale_session_ids:
+                    return
+                
+                print(f"🧹 Found {len(stale_session_ids)} stale session(s) to clean up")
+                
+                for session_id in stale_session_ids:
+                    try:
+                        # Delete events for this session
+                        await db.execute(
+                            delete(Event).where(Event.session_id == session_id)
+                        )
+                        
+                        # Get message IDs to delete associated tool calls
+                        msg_result = await db.execute(
+                            select(Message.id).where(Message.session_id == session_id)
+                        )
+                        message_db_ids = msg_result.scalars().all()
+                        
+                        if message_db_ids:
+                            # Delete tool calls associated with these messages
+                            await db.execute(
+                                delete(ToolCall).where(ToolCall.message_db_id.in_(message_db_ids))
+                            )
+                        
+                        # Delete messages for this session
+                        await db.execute(
+                            delete(Message).where(Message.session_id == session_id)
+                        )
+                        
+                        # Delete the session itself
+                        await db.execute(
+                            delete(Session).where(Session.session_id == session_id)
+                        )
+                        
+                        print(f"  🗑️  Deleted stale session {session_id[:8]}... and all associated data")
+                    except Exception as e:
+                        print(f"  ❌ Error deleting stale session {session_id[:8]}...: {e}")
+                
+                await db.commit()
+                print(f"✅ Stale session cleanup completed ({len(stale_session_ids)} removed)")
+                
+        except Exception as e:
+            print(f"❌ Error during stale session cleanup: {e}")
+
+    async def _delete_session_data(self, session_id: str) -> None:
+        """Delete all data for a session from database.
+        
+        Called when a session JSONL file is deleted (real-time watcher event).
+        Uses cascade delete via Session model relationships where possible,
+        and explicit deletes as fallback.
+        
+        Args:
+            session_id: The session ID to delete.
+        """
+        try:
+            async with get_db_context() as db:
+                # Check if session exists
+                result = await db.execute(
+                    select(Session).where(Session.session_id == session_id)
+                )
+                session = result.scalar_one_or_none()
+                
+                if not session:
+                    print(f"  ⚠️  Session {session_id[:8]}... not found in database, nothing to delete")
+                    return
+                
+                # Delete events for this session
+                event_result = await db.execute(
+                    delete(Event).where(Event.session_id == session_id)
+                )
+                events_deleted = event_result.rowcount
+                
+                # Get message IDs to delete associated tool calls
+                msg_result = await db.execute(
+                    select(Message.id).where(Message.session_id == session_id)
+                )
+                message_db_ids = msg_result.scalars().all()
+                
+                tool_calls_deleted = 0
+                if message_db_ids:
+                    tc_result = await db.execute(
+                        delete(ToolCall).where(ToolCall.message_db_id.in_(message_db_ids))
+                    )
+                    tool_calls_deleted = tc_result.rowcount
+                
+                # Delete messages
+                msg_del_result = await db.execute(
+                    delete(Message).where(Message.session_id == session_id)
+                )
+                messages_deleted = msg_del_result.rowcount
+                
+                # Delete the session
+                await db.execute(
+                    delete(Session).where(Session.session_id == session_id)
+                )
+                
+                await db.commit()
+                
+                print(
+                    f"  ✅ Deleted session {session_id[:8]}... "
+                    f"({messages_deleted} messages, {tool_calls_deleted} tool calls, "
+                    f"{events_deleted} events)"
+                )
+                
+        except Exception as e:
+            print(f"  ❌ Error deleting session {session_id[:8]}...: {e}")
 
     async def _sync_file(self, file_path: Path, full_sync: bool = False) -> None:
         """Sync a single JSONL file to database."""

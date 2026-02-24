@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..config import settings
 from ..database import close_db, init_db
 from ..services.message_sync_service import MessageSyncService
-from .routes import messages, sessions, stats, tool_calls
+from .routes import events, messages, sessions, stats, tool_calls, assets, redteam
 
 
 # Global sync service instance
@@ -74,7 +74,10 @@ app.add_middleware(
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(messages.router, prefix="/api/messages", tags=["Messages"])
 app.include_router(tool_calls.router, prefix="/api/tool-calls", tags=["Tool Calls"])
+app.include_router(events.router, prefix="/api/events", tags=["Events"])
 app.include_router(stats.router, prefix="/api/stats", tags=["Statistics"])
+app.include_router(assets.router, prefix="/api/assets", tags=["Asset Scanning"])
+app.include_router(redteam.router, prefix="/api/redteam", tags=["Red Team"])
 
 
 @app.get("/", tags=["Root"])

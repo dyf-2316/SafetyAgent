@@ -19,6 +19,8 @@ class ToolCallSummary(BaseModel):
     tool_name: str
     status: str
     is_error: bool
+    arguments: dict | None = None
+    result_text: str | None = None
 
     class Config:
         from_attributes = True

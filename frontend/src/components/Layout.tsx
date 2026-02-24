@@ -1,0 +1,81 @@
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Shield, Monitor, ChevronRight, ScanSearch } from 'lucide-react';
+
+const navigation = [
+  { name: 'Agent Monitor',   href: '/monitor',       icon: Monitor,     desc: 'Real-time Monitoring' },
+  { name: 'Asset Shield',    href: '/assets',         icon: Shield,      desc: 'Asset Scanning' },
+  { name: 'Risk Scanner',    href: '/risk-scanner',   icon: ScanSearch,  desc: 'Path Risk Assessment' },
+];
+
+export default function Layout() {
+  const location = useLocation();
+
+  return (
+    <div className="flex min-h-screen">
+      {/* ===== Sidebar ===== */}
+      <aside className="w-56 flex-shrink-0 bg-surface-1 border-r border-border flex flex-col">
+        {/* Logo */}
+        <div className="h-16 flex items-center gap-2.5 px-5 border-b border-border">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-purple-500 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-accent/20">
+            S
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[15px] font-bold text-text-primary tracking-tight">SafeAgent</span>
+            <span className="text-[10px] font-semibold bg-accent/20 text-accent px-1.5 py-0.5 rounded">v2</span>
+          </div>
+        </div>
+
+        {/* Nav Label */}
+        <div className="px-5 pt-6 pb-2">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">Navigation</p>
+        </div>
+
+        {/* Nav Items */}
+        <nav className="flex-1 px-3 space-y-0.5">
+          {navigation.map((item) => {
+            const Icon = item.icon;
+            const isActive = location.pathname === item.href || (item.href === '/monitor' && location.pathname === '/');
+            return (
+              <NavLink
+                key={item.name}
+                to={item.href}
+                className={`
+                  group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150
+                  ${isActive
+                    ? 'bg-accent/15 text-accent shadow-sm'
+                    : 'text-text-secondary hover:text-text-primary hover:bg-surface-2'
+                  }
+                `}
+              >
+                <Icon className={`w-[18px] h-[18px] ${isActive ? 'text-accent' : 'text-text-muted group-hover:text-text-secondary'}`} />
+                <span>{item.name}</span>
+                {isActive && (
+                  <ChevronRight className="w-3.5 h-3.5 ml-auto text-accent/50" />
+                )}
+              </NavLink>
+            );
+          })}
+        </nav>
+
+        {/* Bottom Status */}
+        <div className="p-4 border-t border-border">
+          <div className="flex items-center gap-2.5 px-2 py-2 bg-surface-2 rounded-lg">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
+            </span>
+            <div>
+              <p className="text-[11px] font-medium text-text-primary">System Online</p>
+              <p className="text-[10px] text-text-muted">All services running</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* ===== Main Content ===== */}
+      <main className="flex-1 bg-surface-0 overflow-auto">
+        <Outlet />
+      </main>
+    </div>
+  );
+}

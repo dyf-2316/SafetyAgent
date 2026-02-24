@@ -9,7 +9,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, TimestampMixin
 
 if TYPE_CHECKING:
-    from .event import Event
     from .message import Message
 
 
@@ -91,9 +90,6 @@ class Session(Base, TimestampMixin):
     # Relationships
     messages: Mapped[list["Message"]] = relationship(
         "Message", back_populates="session", cascade="all, delete-orphan"
-    )
-    events: Mapped[list["Event"]] = relationship(
-        "Event", back_populates="session", cascade="all, delete-orphan"
     )
 
     # Indexes

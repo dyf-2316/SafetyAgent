@@ -1,5 +1,5 @@
 """API routes."""
 
-from . import messages, sessions, stats, tool_calls
+from . import assets, events, messages, sessions, stats, tool_calls
 
-__all__ = ["sessions", "messages", "tool_calls", "stats"]
+__all__ = ["sessions", "messages", "tool_calls", "stats", "events", "assets"]
